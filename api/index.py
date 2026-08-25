@@ -100,7 +100,268 @@ def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# API ROUTER DEFINITIONS (Grouped by Resource)
+# CORE DATABASE LOGIC (Reusable functions)
+# ---------------------------------------------------------------------------
+def fetch_overview_kpis_data():
+    kpi_row = query("""
+        SELECT 
+            (SELECT COUNT(*) FROM obs_pipelines) AS total_pipelines,
+            (SELECT total_runs FROM vw_kpi_totals LIMIT 1) AS total_runs,
+            (SELECT success_runs FROM vw_kpi_totals LIMIT 1) AS success_runs,
+            (SELECT failed_runs FROM vw_kpi_totals LIMIT 1) AS failed_runs,
+            (SELECT success_rate_pct FROM vw_kpi_totals LIMIT 1) AS success_rate,
+            (SELECT ROUND(AVG(duration), 0) FROM obs_pipeline_runs) AS avg_duration_sec,
+            (SELECT COUNT(*) FROM vw_failed_runs) AS active_incidents
+    """)[0]
+
+    daily_rows = query("""
+        SELECT 
+            metric_date,
+            total_runs,
+            success_runs,
+            failed_runs,
+            ROUND(success_runs * 100.0 / NULLIF(total_runs, 0), 1) as success_rate
+        FROM vw_daily_metrics
+        ORDER BY metric_date
+    """)
+
+    total_pipes = int(kpi_row["total_pipelines"] or 0)
+    success_rate = float(kpi_row["success_rate"] or 0.0)
+    failed_runs = int(kpi_row["failed_runs"] or 0)
+    avg_sec = int(kpi_row["avg_duration_sec"] or 0)
+    active_incidents = int(kpi_row["active_incidents"] or 0)
+
+    run_sparkline = [int(r["total_runs"]) for r in daily_rows] or [total_pipes]
+    success_sparkline = [float(r["success_rate"]) for r in daily_rows] or [success_rate]
+    failed_sparkline = [int(r["failed_runs"]) for r in daily_rows] or [failed_runs]
+
+    rate_delta = 0.0
+    if len(daily_rows) >= 2:
+        last_rate = float(daily_rows[-1]["success_rate"] or 0)
+        prev_rate = float(daily_rows[-2]["success_rate"] or 0)
+        rate_delta = round(last_rate - prev_rate, 1)
+
+    return {
+        "totalPipelines": {
+            "value": total_pipes,
+            "delta": len(daily_rows),
+            "isPositive": True,
+            "deltaLabel": "registered pipelines",
+            "sparkline": run_sparkline
+        },
+        "successfulRuns": {
+            "value": f"{success_rate}%",
+            "delta": rate_delta,
+            "isPositive": rate_delta >= 0,
+            "deltaLabel": "vs previous period",
+            "sparkline": success_sparkline
+        },
+        "failedRuns": {
+            "value": failed_runs,
+            "delta": failed_runs,
+            "isPositive": failed_runs == 0,
+            "isGoodDown": True,
+            "deltaLabel": "failed pipeline runs",
+            "sparkline": failed_sparkline
+        },
+        "avgDuration": {
+            "value": f"{avg_sec // 60}m {avg_sec % 60}s" if avg_sec >= 60 else f"{avg_sec}s",
+            "valueSeconds": avg_sec,
+            "delta": -8.4,
+            "isPositive": True,
+            "isGoodDown": True,
+            "deltaLabel": "average run time",
+            "sparkline": [avg_sec] * max(len(daily_rows), 1)
+        },
+        "activeIncidents": {
+            "value": active_incidents,
+            "delta": active_incidents,
+            "isPositive": active_incidents == 0,
+            "isGoodDown": True,
+            "deltaLabel": "open failure incidents",
+            "sparkline": failed_sparkline
+        }
+    }
+
+def fetch_pipelines_data(search=None, status="ALL", source="ALL", destination="ALL", owner="ALL", page=1, page_size=10):
+    offset = (page - 1) * page_size
+    where_parts = []
+    params = []
+
+    if search and str(search).strip():
+        where_parts.append("p.pipeline_name LIKE %s")
+        params.append(f"%{search}%")
+
+    if status and str(status).upper() != "ALL":
+        where_parts.append("(h.health_status = %s OR h.latest_status = %s)")
+        params.extend([str(status).lower(), str(status).lower()])
+
+    if source and str(source).upper() != "ALL":
+        where_parts.append("p.source_tool = %s")
+        params.append(str(source).lower())
+
+    if destination and str(destination).upper() != "ALL":
+        where_parts.append("p.target_tool = %s")
+        params.append(str(destination).lower())
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    count_res = query(f"SELECT COUNT(*) AS cnt FROM obs_pipelines p LEFT JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id {where_sql}", tuple(params))
+    total_count = count_res[0]["cnt"] if count_res else 0
+
+    sql = f"""
+        SELECT 
+            p.pipeline_id,
+            p.pipeline_name,
+            p.source_tool,
+            p.source_schema,
+            p.etl_tool,
+            p.target_tool,
+            p.target_schema,
+            p.is_active,
+            h.latest_status,
+            h.last_end_time,
+            h.last_start_time,
+            h.failure_stage,
+            h.failed_node,
+            h.error_class,
+            h.error_message,
+            COALESCE(h.total_runs, 0) as total_runs,
+            COALESCE(h.success_runs, 0) as success_runs,
+            COALESCE(h.failed_count, 0) as failed_count,
+            COALESCE(h.success_rate_pct, 0.0) as success_rate_pct,
+            COALESCE(h.health_status, 'healthy') as health_status,
+            (SELECT COALESCE(SUM(a.row_count), 0) FROM obs_pipeline_runs r JOIN obs_run_assets a ON r.id = a.run_id WHERE r.pipeline_id = p.pipeline_id) as total_records,
+            (SELECT ROUND(AVG(r.duration), 0) FROM obs_pipeline_runs r WHERE r.pipeline_id = p.pipeline_id) as avg_duration
+        FROM obs_pipelines p
+        LEFT JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id
+        {where_sql}
+        ORDER BY h.last_end_time DESC, p.pipeline_name ASC
+        LIMIT %s OFFSET %s
+    """
+    rows = query(sql, tuple(params + [page_size, offset]))
+
+    items = []
+    for r in rows:
+        status_val = "Success" if r["latest_status"] == "success" else ("Failed" if r["latest_status"] == "failed" else "Warning")
+        dur_sec = int(r["avg_duration"] or 15)
+        dur_str = f"{dur_sec // 60}m {dur_sec % 60}s" if dur_sec >= 60 else f"{dur_sec}s"
+        rec_count = int(r["total_records"] or 0)
+        rec_str = f"{rec_count / 1000000:.2f}M" if rec_count >= 1000000 else (f"{rec_count / 1000:.1f}K" if rec_count >= 1000 else str(rec_count))
+
+        items.append({
+            "id": r["pipeline_id"],
+            "pipeline": r["pipeline_name"],
+            "pipeline_name": r["pipeline_name"],
+            "source": (r["source_tool"] or "MySQL").title(),
+            "source_schema": r["source_schema"],
+            "etl_tool": (r["etl_tool"] or "dbt").title(),
+            "target": (r["target_tool"] or "Snowflake").title(),
+            "target_schema": r["target_schema"],
+            "status": status_val,
+            "health_status": r["health_status"],
+            "runs": int(r["total_runs"]),
+            "total_runs": int(r["total_runs"]),
+            "successRate": f"{float(r['success_rate_pct']):.1f}%",
+            "success_rate_pct": float(r["success_rate_pct"]),
+            "duration": dur_str,
+            "avgDuration": dur_str,
+            "recordsProcessed": rec_str,
+            "lastRun": r["last_end_time"].strftime("%b %d, %Y %I:%M %p") if r["last_end_time"] else "N/A",
+            "errorMessage": r["error_message"] or None
+        })
+
+    return {
+        "items": items,
+        "pipelines": items,
+        "total": total_count,
+        "page": page,
+        "pageSize": page_size,
+        "totalPages": max(1, (total_count + page_size - 1) // page_size) if total_count else 1
+    }
+
+def fetch_recent_incidents_data(severity="ALL", limit=5):
+    where_sql = ""
+    params = []
+    if severity and str(severity).upper() != "ALL":
+        where_sql = "WHERE error_class LIKE %s"
+        params.append(f"%{severity}%")
+
+    rows = query(f"""
+        SELECT 
+            run_id,
+            pipeline_name,
+            failure_stage,
+            failed_node,
+            error_class,
+            error_message,
+            start_time,
+            duration
+        FROM vw_failed_runs
+        {where_sql}
+        ORDER BY start_time DESC
+        LIMIT %s
+    """, tuple(params + [limit]))
+    
+    incidents = []
+    for r in rows:
+        err_cls = (r["error_class"] or "etl").lower()
+        sev = "Critical" if "compilation" in err_cls else ("High" if "snowflake" in err_cls else "Medium")
+        
+        incidents.append({
+            "id": r["run_id"],
+            "title": f"Failure in {r['pipeline_name']} ({r['error_class'] or 'runtime'})",
+            "description": r["error_message"] or f"Stage '{r['failure_stage']}' failed at node: {r['failed_node']}",
+            "targetEntity": r["pipeline_name"],
+            "failedNode": r["failed_node"],
+            "failureStage": r["failure_stage"],
+            "severity": sev,
+            "time": r["start_time"].isoformat() if r["start_time"] else None,
+            "relativeTime": r["start_time"].strftime("%b %d, %Y %I:%M %p") if r["start_time"] else "Recently"
+        })
+
+    return {"items": incidents, "total": len(incidents)}
+
+def fetch_overview_health_data():
+    kpis = query("SELECT success_rate_pct FROM vw_kpi_totals LIMIT 1")[0]
+    quality_score = float(kpis["success_rate_pct"] or 80.0)
+
+    schema_stats = query("""
+        SELECT 
+            COUNT(DISTINCT schema_name) as total_schemas,
+            COUNT(DISTINCT object_name) as total_tables,
+            COUNT(*) as total_columns
+        FROM obs_run_columns
+    """)[0]
+    schema_score = min(100.0, round(90.0 + (int(schema_stats['total_schemas'] or 1) * 2.5), 1))
+
+    volume_stats = query("SELECT COUNT(*) as asset_count, SUM(row_count) as total_rows FROM obs_run_assets")[0]
+    volume_score = 95.0 if (volume_stats["total_rows"] or 0) > 0 else 80.0
+
+    freshness_stats = query("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN last_updated_at IS NOT NULL THEN 1 ELSE 0 END) as tracked
+        FROM obs_run_assets
+    """)[0]
+    freshness_score = round((int(freshness_stats["tracked"] or 0) / max(int(freshness_stats["total"] or 1), 1)) * 100.0, 1)
+
+    overall = round((quality_score + schema_score + volume_score + freshness_score) / 4.0, 1)
+
+    return {
+        "overallScore": overall,
+        "dimensions": [
+            { "id": "freshness", "name": "Freshness", "score": freshness_score, "delta": 2.7, "status": "Good" if freshness_score >= 80 else "Warning" },
+            { "id": "volume", "name": "Volume", "score": volume_score, "delta": 1.8, "status": "Good" },
+            { "id": "quality", "name": "Data Quality", "score": quality_score, "delta": 3.1, "status": "Good" if quality_score >= 80 else "Warning" },
+            { "id": "schema", "name": "Schema", "score": schema_score, "delta": 1.2, "status": "Good" },
+            { "id": "consistency", "name": "Consistency", "score": 91.1, "delta": 2.5, "status": "Good" },
+            { "id": "uniqueness", "name": "Uniqueness", "score": 89.2, "delta": -0.6, "status": "Warning" }
+        ]
+    }
+
+# ---------------------------------------------------------------------------
+# API ROUTER DEFINITIONS
 # ---------------------------------------------------------------------------
 overview_router   = APIRouter(prefix="/api/v1/overview", tags=["Overview"])
 pipelines_router  = APIRouter(prefix="/api/v1/pipelines", tags=["Pipelines"])
@@ -152,95 +413,17 @@ def get_full_overview():
             "version": "2.1.0"
         },
         "data": {
-            "kpis": get_overview_kpis(),
-            "charts": get_overview_charts(),
-            "observabilityHealth": get_overview_health(),
-            "recentIncidents": get_recent_incidents().get("items", []),
-            "pipelineMonitoring": get_pipelines(page=1, page_size=10).get("items", [])
+            "kpis": fetch_overview_kpis_data(),
+            "charts": get_overview_charts(time_range="24h"),
+            "observabilityHealth": fetch_overview_health_data(),
+            "recentIncidents": fetch_recent_incidents_data(limit=5).get("items", []),
+            "pipelineMonitoring": fetch_pipelines_data(page=1, page_size=10).get("items", [])
         }
     })
 
 @overview_router.get("/kpis", summary="Overview KPI Total Cards")
 def get_overview_kpis():
-    kpi_row = query("""
-        SELECT 
-            (SELECT COUNT(*) FROM obs_pipelines) AS total_pipelines,
-            (SELECT total_runs FROM vw_kpi_totals LIMIT 1) AS total_runs,
-            (SELECT success_runs FROM vw_kpi_totals LIMIT 1) AS success_runs,
-            (SELECT failed_runs FROM vw_kpi_totals LIMIT 1) AS failed_runs,
-            (SELECT success_rate_pct FROM vw_kpi_totals LIMIT 1) AS success_rate,
-            (SELECT ROUND(AVG(duration), 0) FROM obs_pipeline_runs) AS avg_duration_sec,
-            (SELECT COUNT(*) FROM vw_failed_runs) AS active_incidents
-    """)[0]
-
-    daily_rows = query("""
-        SELECT 
-            metric_date,
-            total_runs,
-            success_runs,
-            failed_runs,
-            ROUND(success_runs * 100.0 / NULLIF(total_runs, 0), 1) as success_rate
-        FROM vw_daily_metrics
-        ORDER BY metric_date
-    """)
-
-    total_pipes = int(kpi_row["total_pipelines"] or 0)
-    success_rate = float(kpi_row["success_rate"] or 0.0)
-    failed_runs = int(kpi_row["failed_runs"] or 0)
-    avg_sec = int(kpi_row["avg_duration_sec"] or 0)
-    active_incidents = int(kpi_row["active_incidents"] or 0)
-
-    run_sparkline = [int(r["total_runs"]) for r in daily_rows] or [total_pipes]
-    success_sparkline = [float(r["success_rate"]) for r in daily_rows] or [success_rate]
-    failed_sparkline = [int(r["failed_runs"]) for r in daily_rows] or [failed_runs]
-
-    rate_delta = 0.0
-    if len(daily_rows) >= 2:
-        last_rate = float(daily_rows[-1]["success_rate"] or 0)
-        prev_rate = float(daily_rows[-2]["success_rate"] or 0)
-        rate_delta = round(last_rate - prev_rate, 1)
-
-    return jsonify({
-        "totalPipelines": {
-            "value": total_pipes,
-            "delta": len(daily_rows),
-            "isPositive": True,
-            "deltaLabel": "registered pipelines",
-            "sparkline": run_sparkline
-        },
-        "successfulRuns": {
-            "value": f"{success_rate}%",
-            "delta": rate_delta,
-            "isPositive": rate_delta >= 0,
-            "deltaLabel": "vs previous period",
-            "sparkline": success_sparkline
-        },
-        "failedRuns": {
-            "value": failed_runs,
-            "delta": failed_runs,
-            "isPositive": failed_runs == 0,
-            "isGoodDown": True,
-            "deltaLabel": "failed pipeline runs",
-            "sparkline": failed_sparkline
-        },
-        "avgDuration": {
-            "value": f"{avg_sec // 60}m {avg_sec % 60}s" if avg_sec >= 60 else f"{avg_sec}s",
-            "valueSeconds": avg_sec,
-            "delta": -8.4,
-            "isPositive": True,
-            "isGoodDown": True,
-            "deltaLabel": "average run time",
-            "sparkline": [avg_sec] * max(len(daily_rows), 1)
-        },
-        "activeIncidents": {
-            "value": active_incidents,
-            "delta": active_incidents,
-            "isPositive": active_incidents == 0,
-            "isGoodDown": True,
-            "deltaLabel": "open failure incidents",
-            "sparkline": failed_sparkline
-        }
-    })
+    return jsonify(fetch_overview_kpis_data())
 
 @overview_router.get("/charts", summary="Overview Execution & Incident Charts")
 def get_overview_charts(
@@ -314,95 +497,21 @@ def get_overview_charts(
 
 @overview_router.get("/health", summary="5-Pillar Observability Dimensions")
 def get_overview_health():
-    kpis = query("SELECT success_rate_pct FROM vw_kpi_totals LIMIT 1")[0]
-    quality_score = float(kpis["success_rate_pct"] or 80.0)
-
-    schema_stats = query("""
-        SELECT 
-            COUNT(DISTINCT schema_name) as total_schemas,
-            COUNT(DISTINCT object_name) as total_tables,
-            COUNT(*) as total_columns
-        FROM obs_run_columns
-    """)[0]
-    schema_score = min(100.0, round(90.0 + (int(schema_stats['total_schemas'] or 1) * 2.5), 1))
-
-    volume_stats = query("SELECT COUNT(*) as asset_count, SUM(row_count) as total_rows FROM obs_run_assets")[0]
-    volume_score = 95.0 if (volume_stats["total_rows"] or 0) > 0 else 80.0
-
-    freshness_stats = query("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN last_updated_at IS NOT NULL THEN 1 ELSE 0 END) as tracked
-        FROM obs_run_assets
-    """)[0]
-    freshness_score = round((int(freshness_stats["tracked"] or 0) / max(int(freshness_stats["total"] or 1), 1)) * 100.0, 1)
-
-    overall = round((quality_score + schema_score + volume_score + freshness_score) / 4.0, 1)
-
-    return jsonify({
-        "overallScore": overall,
-        "dimensions": [
-            { "id": "freshness", "name": "Freshness", "score": freshness_score, "delta": 2.7, "status": "Good" if freshness_score >= 80 else "Warning" },
-            { "id": "volume", "name": "Volume", "score": volume_score, "delta": 1.8, "status": "Good" },
-            { "id": "quality", "name": "Data Quality", "score": quality_score, "delta": 3.1, "status": "Good" if quality_score >= 80 else "Warning" },
-            { "id": "schema", "name": "Schema", "score": schema_score, "delta": 1.2, "status": "Good" },
-            { "id": "consistency", "name": "Consistency", "score": 91.1, "delta": 2.5, "status": "Good" },
-            { "id": "uniqueness", "name": "Uniqueness", "score": 89.2, "delta": -0.6, "status": "Warning" }
-        ]
-    })
+    return jsonify(fetch_overview_health_data())
 
 @overview_router.get("/recent-incidents", summary="Recent Pipeline Incidents")
 def get_recent_incidents(
     severity: Optional[str] = Query("ALL", description="Filter by severity: ALL, Critical, High, Medium, Low"),
     limit: int = Query(5, ge=1, le=50, description="Max incidents to return")
 ):
-    where_sql = ""
-    params = []
-    if severity and severity.upper() != "ALL":
-        where_sql = "WHERE error_class LIKE %s"
-        params.append(f"%{severity}%")
-
-    rows = query(f"""
-        SELECT 
-            run_id,
-            pipeline_name,
-            failure_stage,
-            failed_node,
-            error_class,
-            error_message,
-            start_time,
-            duration
-        FROM vw_failed_runs
-        {where_sql}
-        ORDER BY start_time DESC
-        LIMIT %s
-    """, tuple(params + [limit]))
-    
-    incidents = []
-    for r in rows:
-        err_cls = (r["error_class"] or "etl").lower()
-        sev = "Critical" if "compilation" in err_cls else ("High" if "snowflake" in err_cls else "Medium")
-        
-        incidents.append({
-            "id": r["run_id"],
-            "title": f"Failure in {r['pipeline_name']} ({r['error_class'] or 'runtime'})",
-            "description": r["error_message"] or f"Stage '{r['failure_stage']}' failed at node: {r['failed_node']}",
-            "targetEntity": r["pipeline_name"],
-            "failedNode": r["failed_node"],
-            "failureStage": r["failure_stage"],
-            "severity": sev,
-            "time": r["start_time"].isoformat() if r["start_time"] else None,
-            "relativeTime": r["start_time"].strftime("%b %d, %Y %I:%M %p") if r["start_time"] else "Recently"
-        })
-
-    return jsonify({"items": incidents, "total": len(incidents)})
+    return jsonify(fetch_recent_incidents_data(severity=severity, limit=limit))
 
 @overview_router.get("/pipeline-monitoring", summary="Overview Pipeline Monitoring Table")
 def get_overview_monitoring():
-    return get_pipelines(page=1, page_size=5)
+    return jsonify(fetch_pipelines_data(page=1, page_size=5))
 
 # ---------------------------------------------------------------------------
-# 2. PIPELINES MODULE (Comprehensive Filtering & Search)
+# 2. PIPELINES MODULE
 # ---------------------------------------------------------------------------
 @pipelines_router.get("", summary="List Pipelines with Advanced Filters")
 def get_pipelines(
@@ -414,104 +523,10 @@ def get_pipelines(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page")
 ):
-    offset = (page - 1) * page_size
-    where_parts = []
-    params = []
-
-    if search:
-        where_parts.append("p.pipeline_name LIKE %s")
-        params.append(f"%{search}%")
-
-    if status and status.upper() != "ALL":
-        where_parts.append("(h.health_status = %s OR h.latest_status = %s)")
-        params.extend([status.lower(), status.lower()])
-
-    if source and source.upper() != "ALL":
-        where_parts.append("p.source_tool = %s")
-        params.append(source.lower())
-
-    if destination and destination.upper() != "ALL":
-        where_parts.append("p.target_tool = %s")
-        params.append(destination.lower())
-
-    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-
-    count_res = query(f"SELECT COUNT(*) AS cnt FROM obs_pipelines p LEFT JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id {where_sql}", tuple(params))
-    total_count = count_res[0]["cnt"] if count_res else 0
-
-    sql = f"""
-        SELECT 
-            p.pipeline_id,
-            p.pipeline_name,
-            p.source_tool,
-            p.source_schema,
-            p.etl_tool,
-            p.target_tool,
-            p.target_schema,
-            p.is_active,
-            h.latest_status,
-            h.last_end_time,
-            h.last_start_time,
-            h.failure_stage,
-            h.failed_node,
-            h.error_class,
-            h.error_message,
-            COALESCE(h.total_runs, 0) as total_runs,
-            COALESCE(h.success_runs, 0) as success_runs,
-            COALESCE(h.failed_count, 0) as failed_count,
-            COALESCE(h.success_rate_pct, 0.0) as success_rate_pct,
-            COALESCE(h.health_status, 'healthy') as health_status,
-            (SELECT COALESCE(SUM(a.row_count), 0) FROM obs_pipeline_runs r JOIN obs_run_assets a ON r.id = a.run_id WHERE r.pipeline_id = p.pipeline_id) as total_records,
-            (SELECT ROUND(AVG(r.duration), 0) FROM obs_pipeline_runs r WHERE r.pipeline_id = p.pipeline_id) as avg_duration
-        FROM obs_pipelines p
-        LEFT JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id
-        {where_sql}
-        ORDER BY h.last_end_time DESC, p.pipeline_name ASC
-        LIMIT %s OFFSET %s
-    """
-    rows = query(sql, tuple(params + [page_size, offset]))
-
-    items = []
-    for r in rows:
-        status_val = "Success" if r["latest_status"] == "success" else ("Failed" if r["latest_status"] == "failed" else "Warning")
-        dur_sec = int(r["avg_duration"] or 15)
-        dur_str = f"{dur_sec // 60}m {dur_sec % 60}s" if dur_sec >= 60 else f"{dur_sec}s"
-        rec_count = int(r["total_records"] or 0)
-        rec_str = f"{rec_count / 1000000:.2f}M" if rec_count >= 1000000 else (f"{rec_count / 1000:.1f}K" if rec_count >= 1000 else str(rec_count))
-
-        items.append({
-            "id": r["pipeline_id"],
-            "pipeline": r["pipeline_name"],
-            "pipeline_name": r["pipeline_name"],
-            "source": (r["source_tool"] or "MySQL").title(),
-            "source_schema": r["source_schema"],
-            "etl_tool": (r["etl_tool"] or "dbt").title(),
-            "target": (r["target_tool"] or "Snowflake").title(),
-            "target_schema": r["target_schema"],
-            "status": status_val,
-            "health_status": r["health_status"],
-            "runs": int(r["total_runs"]),
-            "total_runs": int(r["total_runs"]),
-            "successRate": f"{float(r['success_rate_pct']):.1f}%",
-            "success_rate_pct": float(r["success_rate_pct"]),
-            "duration": dur_str,
-            "avgDuration": dur_str,
-            "recordsProcessed": rec_str,
-            "lastRun": r["last_end_time"].strftime("%b %d, %Y %I:%M %p") if r["last_end_time"] else "N/A",
-            "errorMessage": r["error_message"] or None
-        })
-
-    return jsonify({
-        "items": items,
-        "pipelines": items,
-        "total": total_count,
-        "page": page,
-        "pageSize": page_size,
-        "totalPages": max(1, (total_count + page_size - 1) // page_size) if total_count else 1
-    })
+    return jsonify(fetch_pipelines_data(search=search, status=status, source=source, destination=destination, owner=owner, page=page, page_size=page_size))
 
 # ---------------------------------------------------------------------------
-# 3. DATA QUALITY MODULE (Filters by pipeline, domain, status)
+# 3. DATA QUALITY MODULE
 # ---------------------------------------------------------------------------
 @quality_router.get("", summary="Data Quality Health & Pipeline Checks")
 def get_data_quality(
@@ -528,9 +543,9 @@ def get_data_quality(
 
     where_parts = []
     params = []
-    if pipeline and pipeline.upper() != "ALL":
+    if pipeline and str(pipeline).upper() != "ALL":
         where_parts.append("p.pipeline_name = %s")
-        params.append(pipeline)
+        params.append(str(pipeline))
 
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
@@ -553,7 +568,7 @@ def get_data_quality(
     for pq in pipe_quality:
         score = float(pq["success_rate_pct"] or 0)
         status_label = "Good" if score >= 85 else ("Warning" if score >= 50 else "Poor")
-        if status and status.upper() != "ALL" and status_label.lower() != status.lower():
+        if status and str(status).upper() != "ALL" and status_label.lower() != str(status).lower():
             continue
 
         top_pipes.append({
@@ -581,7 +596,7 @@ def get_data_quality(
     })
 
 # ---------------------------------------------------------------------------
-# 4. DATA FRESHNESS MODULE (Filters by search, status, owner)
+# 4. DATA FRESHNESS MODULE
 # ---------------------------------------------------------------------------
 @freshness_router.get("", summary="Data Freshness SLAs & Asset Lag")
 def get_data_freshness(
@@ -592,7 +607,7 @@ def get_data_freshness(
 ):
     where_parts = []
     params = []
-    if search:
+    if search and str(search).strip():
         where_parts.append("(a.object_name LIKE %s OR a.schema_name LIKE %s)")
         params.extend([f"%{search}%", f"%{search}%"])
 
@@ -631,7 +646,7 @@ def get_data_freshness(
             st = "Stale"
             stale_cnt += 1
 
-        if status and status.upper() != "ALL" and st.lower() != status.lower():
+        if status and str(status).upper() != "ALL" and st.lower() != str(status).lower():
             continue
 
         lag_str = f"{lag // 60}h {lag % 60}m" if lag >= 60 else f"{lag} min"
@@ -658,7 +673,7 @@ def get_data_freshness(
     })
 
 # ---------------------------------------------------------------------------
-# 5. SCHEMA OBSERVABILITY MODULE (Filters by domain, schema_type, change_type)
+# 5. SCHEMA OBSERVABILITY MODULE
 # ---------------------------------------------------------------------------
 @schema_router.get("", summary="Schema Evolution, Drift & Column Auditing")
 def get_schema_observability(
@@ -669,13 +684,13 @@ def get_schema_observability(
 ):
     where_parts = []
     params = []
-    if domain and domain.upper() != "ALL":
+    if domain and str(domain).upper() != "ALL":
         where_parts.append("schema_name = %s")
-        params.append(domain)
-    if data_type and data_type.upper() != "ALL":
+        params.append(str(domain))
+    if data_type and str(data_type).upper() != "ALL":
         where_parts.append("data_type = %s")
-        params.append(data_type)
-    if search:
+        params.append(str(data_type))
+    if search and str(search).strip():
         where_parts.append("(column_name LIKE %s OR object_name LIKE %s)")
         params.extend([f"%{search}%", f"%{search}%"])
 
@@ -764,7 +779,7 @@ def get_volume_observability():
     })
 
 # ---------------------------------------------------------------------------
-# 7. METRICS EXPLORER MODULE (Filters by category, pipeline, group_by)
+# 7. METRICS EXPLORER MODULE
 # ---------------------------------------------------------------------------
 @metrics_router.get("", summary="Live Execution Metrics & Telemetry")
 def get_metrics_explorer(
@@ -785,9 +800,9 @@ def get_metrics_explorer(
 
     where_sql = ""
     params = []
-    if pipeline and pipeline.upper() != "ALL":
+    if pipeline and str(pipeline).upper() != "ALL":
         where_sql = "WHERE p.pipeline_name = %s"
-        params.append(pipeline)
+        params.append(str(pipeline))
 
     pipes = query(f"""
         SELECT 
@@ -833,7 +848,7 @@ def get_metrics_explorer(
     })
 
 # ---------------------------------------------------------------------------
-# 8. LOGS MODULE (Filters by level, pipeline, tool, search, limit)
+# 8. LOGS MODULE
 # ---------------------------------------------------------------------------
 @logs_router.get("", summary="Real-time Execution Logs Stream")
 def get_logs(
@@ -846,21 +861,21 @@ def get_logs(
     where_parts = []
     params = []
 
-    if level and level.upper() != "ALL":
-        if level.upper() == "ERROR":
+    if level and str(level).upper() != "ALL":
+        if str(level).upper() == "ERROR":
             where_parts.append("r.status = 'failed'")
         else:
             where_parts.append("r.status != 'failed'")
 
-    if pipeline and pipeline.upper() != "ALL":
+    if pipeline and str(pipeline).upper() != "ALL":
         where_parts.append("r.pipeline_name = %s")
-        params.append(pipeline)
+        params.append(str(pipeline))
 
-    if tool and tool.upper() != "ALL":
+    if tool and str(tool).upper() != "ALL":
         where_parts.append("r.tool_name = %s")
-        params.append(tool.lower())
+        params.append(str(tool).lower())
 
-    if search:
+    if search and str(search).strip():
         where_parts.append("(r.error_message LIKE %s OR r.pipeline_name LIKE %s)")
         params.extend([f"%{search}%", f"%{search}%"])
 
@@ -915,7 +930,7 @@ def get_logs(
     })
 
 # ---------------------------------------------------------------------------
-# 9. INCIDENTS MODULE (Filters by severity, status, search)
+# 9. INCIDENTS MODULE
 # ---------------------------------------------------------------------------
 @incidents_router.get("", summary="Incident Management & Triage")
 def get_incidents(
@@ -926,7 +941,7 @@ def get_incidents(
     where_parts = []
     params = []
 
-    if search:
+    if search and str(search).strip():
         where_parts.append("(pipeline_name LIKE %s OR error_message LIKE %s)")
         params.extend([f"%{search}%", f"%{search}%"])
 
@@ -951,7 +966,7 @@ def get_incidents(
     for r in failed_rows:
         err_cls = (r["error_class"] or "etl").lower()
         sev = "Critical" if "compilation" in err_cls else ("High" if "snowflake" in err_cls else "Medium")
-        if severity and severity.upper() != "ALL" and sev.lower() != severity.lower():
+        if severity and str(severity).upper() != "ALL" and sev.lower() != str(severity).lower():
             continue
 
         items.append({
@@ -979,7 +994,7 @@ def get_incidents(
     })
 
 # ---------------------------------------------------------------------------
-# 10. LINEAGE MODULE (Filters by source, target, status, search)
+# 10. LINEAGE MODULE
 # ---------------------------------------------------------------------------
 @lineage_router.get("", summary="End-to-End Data Lineage & Topology")
 def get_lineage(
@@ -991,15 +1006,15 @@ def get_lineage(
     where_parts = []
     params = []
 
-    if search:
+    if search and str(search).strip():
         where_parts.append("p.pipeline_name LIKE %s")
         params.append(f"%{search}%")
-    if source_type and source_type.upper() != "ALL":
+    if source_type and str(source_type).upper() != "ALL":
         where_parts.append("p.source_tool = %s")
-        params.append(source_type.lower())
-    if target_type and target_type.upper() != "ALL":
+        params.append(str(source_type).lower())
+    if target_type and str(target_type).upper() != "ALL":
         where_parts.append("p.target_tool = %s")
-        params.append(target_type.lower())
+        params.append(str(target_type).lower())
 
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
@@ -1027,7 +1042,7 @@ def get_lineage(
     flows = []
     for p in pipes:
         st = "Healthy" if p["health_status"] == "healthy" else ("Degraded" if p["health_status"] == "stale" else "Failed")
-        if status and status.upper() != "ALL" and st.lower() != status.lower():
+        if status and str(status).upper() != "ALL" and st.lower() != str(status).lower():
             continue
 
         rec_cnt = int(p["total_rows"] or 0)
@@ -1075,7 +1090,7 @@ def get_alerts():
     })
 
 # ---------------------------------------------------------------------------
-# INCLUDE CLEAN APIRouters (Exact canonical endpoints)
+# INCLUDE CLEAN APIRouters
 # ---------------------------------------------------------------------------
 app.include_router(overview_router)
 app.include_router(pipelines_router)
