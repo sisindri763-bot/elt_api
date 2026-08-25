@@ -144,6 +144,9 @@ def health_check():
 # 1. OVERVIEW KPIS (Dynamically computed from DB)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/overview/kpis")
+@app.get("/v1/overview/kpis")
+@app.get("/api/overview/kpis")
+@app.get("/overview/kpis")
 @app.get("/api/overview/kpis")
 def get_overview_kpis():
     # 1. Overall Totals
@@ -234,6 +237,9 @@ def get_overview_kpis():
 # 2. OVERVIEW CHARTS (Dynamic timeseries from DB)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/overview/charts")
+@app.get("/v1/overview/charts")
+@app.get("/api/overview/charts")
+@app.get("/overview/charts")
 @app.get("/api/overview/charts")
 def get_overview_charts():
     daily_rows = query("""
@@ -316,6 +322,9 @@ def get_overview_charts():
 # 3. OVERVIEW HEALTH (Dynamic 5-Pillars from DB Metrics)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/overview/health")
+@app.get("/v1/overview/health")
+@app.get("/api/overview/health")
+@app.get("/overview/health")
 @app.get("/api/overview/health")
 def get_overview_health():
     # 1. Quality score from success rate
@@ -363,6 +372,9 @@ def get_overview_health():
 # 4. RECENT INCIDENTS (Dynamic query from vw_failed_runs)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/overview/recent-incidents")
+@app.get("/v1/overview/recent-incidents")
+@app.get("/api/overview/recent-incidents")
+@app.get("/overview/recent-incidents")
 @app.get("/api/overview/recent-incidents")
 def get_recent_incidents():
     rows = query("""
@@ -403,8 +415,14 @@ def get_recent_incidents():
 # 5. PIPELINES DIRECTORY & MONITORING (Dynamic query on vw_pipeline_health)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/pipelines")
+@app.get("/v1/pipelines")
+@app.get("/api/pipelines")
+@app.get("/pipelines")
 @app.get("/api/pipelines")
 @app.get("/api/v1/overview/pipeline-monitoring")
+@app.get("/v1/overview/pipeline-monitoring")
+@app.get("/api/overview/pipeline-monitoring")
+@app.get("/overview/pipeline-monitoring")
 @app.get("/api/overview/pipeline-monitoring")
 def get_pipelines(
     page: int = Query(1, ge=1),
@@ -504,6 +522,9 @@ def get_pipelines(
 # 6. CONSOLIDATED OVERVIEW
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/overview")
+@app.get("/v1/overview")
+@app.get("/api/overview")
+@app.get("/overview")
 @app.get("/api/overview")
 def get_full_overview():
     return jsonify({
@@ -528,6 +549,9 @@ def get_full_overview():
 # 7. DATA QUALITY OBSERVABILITY (Dynamic from actual DB pipeline runs)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/observability/quality")
+@app.get("/v1/observability/quality")
+@app.get("/api/observability/data-quality")
+@app.get("/observability/data-quality")
 @app.get("/api/observability/data-quality")
 def get_data_quality():
     totals = query("""
@@ -592,6 +616,9 @@ def get_data_quality():
 # 8. DATA FRESHNESS OBSERVABILITY (Dynamic from obs_run_assets)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/observability/freshness")
+@app.get("/v1/observability/freshness")
+@app.get("/api/observability/freshness")
+@app.get("/observability/freshness")
 @app.get("/api/observability/freshness")
 def get_data_freshness():
     assets = query("""
@@ -653,6 +680,9 @@ def get_data_freshness():
 # 9. SCHEMA OBSERVABILITY (Dynamic from obs_run_columns)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/observability/schema")
+@app.get("/v1/observability/schema")
+@app.get("/api/observability/schema")
+@app.get("/observability/schema")
 @app.get("/api/observability/schema")
 def get_schema_observability():
     # Type breakdown
@@ -719,6 +749,9 @@ def get_schema_observability():
 # 10. VOLUME OBSERVABILITY (Dynamic from obs_run_assets)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/observability/volume")
+@app.get("/v1/observability/volume")
+@app.get("/api/observability/volume")
+@app.get("/observability/volume")
 @app.get("/api/observability/volume")
 def get_volume_observability():
     vol_stats = query("SELECT COUNT(*) as asset_count, SUM(row_count) as total_rows FROM obs_run_assets")[0]
@@ -744,6 +777,10 @@ def get_volume_observability():
 # 11. METRICS EXPLORER (Dynamic from actual run metrics)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/metrics")
+@app.get("/v1/metrics")
+@app.get("/api/observability/metrics")
+@app.get("/observability/metrics")
+@app.get("/metrics")
 @app.get("/api/observability/metrics")
 def get_metrics_explorer():
     kpis = query("""
@@ -803,6 +840,9 @@ def get_metrics_explorer():
 # 12. LOGS STREAM (Dynamic from obs_pipeline_runs)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/logs")
+@app.get("/v1/logs")
+@app.get("/api/logs")
+@app.get("/logs")
 @app.get("/api/logs")
 def get_logs(
     limit: int = Query(20, le=100),
@@ -859,6 +899,9 @@ def get_logs(
 # 13. INCIDENTS (Dynamic from vw_failed_runs)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/incidents")
+@app.get("/v1/incidents")
+@app.get("/api/incidents")
+@app.get("/incidents")
 @app.get("/api/incidents")
 def get_incidents():
     failed_rows = query("""
@@ -907,6 +950,9 @@ def get_incidents():
 # 14. LINEAGE (Dynamic from obs_pipelines and obs_run_assets)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/lineage")
+@app.get("/v1/lineage")
+@app.get("/api/lineage")
+@app.get("/lineage")
 @app.get("/api/lineage")
 def get_lineage():
     pipes = query("""
@@ -958,6 +1004,9 @@ def get_lineage():
 # 15. ALERTS (Dynamic from recent failures)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/alerts")
+@app.get("/v1/alerts")
+@app.get("/api/alerts")
+@app.get("/alerts")
 @app.get("/api/alerts")
 def get_alerts():
     failed = query("SELECT run_id, pipeline_name, error_class, error_message, start_time FROM vw_failed_runs ORDER BY start_time DESC LIMIT 5")
