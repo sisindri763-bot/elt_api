@@ -99,9 +99,36 @@ def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# Health Check
+# API Root & Health Check
 # ---------------------------------------------------------------------------
 @app.get("/")
+def api_root():
+    return {
+        "message": "VITHI Data Observability Engine REST API is Running",
+        "version": "2.1.0",
+        "status": "online",
+        "docs_url": "/docs",
+        "endpoints": {
+            "swagger_ui": "/docs",
+            "health_check": "/health",
+            "overview_dashboard": "/api/v1/overview",
+            "overview_kpis": "/api/v1/overview/kpis",
+            "overview_charts": "/api/v1/overview/charts",
+            "overview_health_pillars": "/api/v1/overview/health",
+            "recent_incidents": "/api/v1/overview/recent-incidents",
+            "pipelines_directory": "/api/v1/pipelines",
+            "data_quality": "/api/v1/observability/quality",
+            "data_freshness": "/api/v1/observability/freshness",
+            "schema_observability": "/api/v1/observability/schema",
+            "volume_observability": "/api/v1/observability/volume",
+            "metrics_explorer": "/api/v1/metrics",
+            "logs_stream": "/api/v1/logs",
+            "incident_manager": "/api/v1/incidents",
+            "lineage_dag": "/api/v1/lineage",
+            "alerts": "/api/v1/alerts"
+        }
+    }
+
 @app.get("/health")
 def health_check():
     res = query("SELECT 1 as is_alive")
@@ -109,8 +136,6 @@ def health_check():
     return {
         "status": "healthy" if db_alive else "degraded",
         "database": "connected" if db_alive else "disconnected",
-        "host": HOST,
-        "database_name": DB_NAME,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "2.1.0"
     }
