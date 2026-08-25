@@ -1,6 +1,6 @@
 """
-VITHI Data Observability Engine - Production Backend REST API
-100% Dynamically Powered by AWS RDS MySQL `metadata` Database
+VITHI Data Observability Engine - Production REST API
+Connected to AWS RDS MySQL metadata Database
 """
 
 import os
@@ -11,7 +11,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 
 # ---------------------------------------------------------------------------
@@ -26,25 +26,26 @@ PASSWORD = os.getenv("CENTRAL_DB_PASSWORD") or os.getenv("DB_PASSWORD", "")
 DB_NAME  = os.getenv("CENTRAL_DB_NAME") or os.getenv("DB_NAME", "metadata")
 
 app = FastAPI(
-    title="VITHI Data Observability Engine",
-    description="Real-time production API querying AWS RDS MySQL `metadata` database.",
+    title="VITHI Data Observability REST API",
+    description="Production-grade Data Observability Backend REST API connected directly to AWS RDS MySQL metadata DB.",
     version="2.1.0",
-)
-
-cors_origins_env = os.getenv("CORS_ORIGINS", "*")
-origins = [orig.strip() for orig in cors_origins_env.split(",")] if cors_origins_env != "*" else ["*"]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # ---------------------------------------------------------------------------
-# JSON Serializer for DB types
+# CORS Configuration
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# JSON Serializer for DB Types
 # ---------------------------------------------------------------------------
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -99,37 +100,33 @@ def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# API Root & Health Check
+# API ROUTER DEFINITIONS (Grouped by Resource)
 # ---------------------------------------------------------------------------
-@app.get("/")
+overview_router   = APIRouter(prefix="/api/v1/overview", tags=["Overview"])
+pipelines_router  = APIRouter(prefix="/api/v1/pipelines", tags=["Pipelines"])
+quality_router    = APIRouter(prefix="/api/v1/observability/quality", tags=["Data Quality"])
+freshness_router  = APIRouter(prefix="/api/v1/observability/freshness", tags=["Data Freshness"])
+schema_router     = APIRouter(prefix="/api/v1/observability/schema", tags=["Schema Observability"])
+volume_router     = APIRouter(prefix="/api/v1/observability/volume", tags=["Volume Observability"])
+metrics_router    = APIRouter(prefix="/api/v1/metrics", tags=["Metrics Explorer"])
+logs_router       = APIRouter(prefix="/api/v1/logs", tags=["Logs Stream"])
+incidents_router  = APIRouter(prefix="/api/v1/incidents", tags=["Incidents"])
+lineage_router    = APIRouter(prefix="/api/v1/lineage", tags=["Lineage"])
+alerts_router     = APIRouter(prefix="/api/v1/alerts", tags=["Alerts"])
+
+# ---------------------------------------------------------------------------
+# ROOT & HEALTH
+# ---------------------------------------------------------------------------
+@app.get("/", tags=["System"], summary="API Root")
 def api_root():
     return {
         "message": "VITHI Data Observability Engine REST API is Running",
         "version": "2.1.0",
         "status": "online",
-        "docs_url": "/docs",
-        "endpoints": {
-            "swagger_ui": "/docs",
-            "health_check": "/health",
-            "overview_dashboard": "/api/v1/overview",
-            "overview_kpis": "/api/v1/overview/kpis",
-            "overview_charts": "/api/v1/overview/charts",
-            "overview_health_pillars": "/api/v1/overview/health",
-            "recent_incidents": "/api/v1/overview/recent-incidents",
-            "pipelines_directory": "/api/v1/pipelines",
-            "data_quality": "/api/v1/observability/quality",
-            "data_freshness": "/api/v1/observability/freshness",
-            "schema_observability": "/api/v1/observability/schema",
-            "volume_observability": "/api/v1/observability/volume",
-            "metrics_explorer": "/api/v1/metrics",
-            "logs_stream": "/api/v1/logs",
-            "incident_manager": "/api/v1/incidents",
-            "lineage_dag": "/api/v1/lineage",
-            "alerts": "/api/v1/alerts"
-        }
+        "docs_url": "/docs"
     }
 
-@app.get("/health")
+@app.get("/health", tags=["System"], summary="Health Check")
 def health_check():
     res = query("SELECT 1 as is_alive")
     db_alive = len(res) > 0 and res[0]["is_alive"] == 1
@@ -141,15 +138,30 @@ def health_check():
     }
 
 # ---------------------------------------------------------------------------
-# 1. OVERVIEW KPIS (Dynamically computed from DB)
+# 1. OVERVIEW MODULE
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/overview/kpis")
-@app.get("/v1/overview/kpis")
-@app.get("/api/overview/kpis")
-@app.get("/overview/kpis")
-@app.get("/api/overview/kpis")
+@overview_router.get("", summary="Consolidated Overview Dashboard")
+def get_full_overview():
+    return jsonify({
+        "status": "success",
+        "code": 200,
+        "meta": {
+            "environment": "production",
+            "database": DB_NAME,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "version": "2.1.0"
+        },
+        "data": {
+            "kpis": get_overview_kpis(),
+            "charts": get_overview_charts(),
+            "observabilityHealth": get_overview_health(),
+            "recentIncidents": get_recent_incidents().get("items", []),
+            "pipelineMonitoring": get_pipelines(page=1, page_size=10).get("items", [])
+        }
+    })
+
+@overview_router.get("/kpis", summary="Overview KPI Total Cards")
 def get_overview_kpis():
-    # 1. Overall Totals
     kpi_row = query("""
         SELECT 
             (SELECT COUNT(*) FROM obs_pipelines) AS total_pipelines,
@@ -161,7 +173,6 @@ def get_overview_kpis():
             (SELECT COUNT(*) FROM vw_failed_runs) AS active_incidents
     """)[0]
 
-    # 2. Daily sparkline trend from actual daily metrics in DB
     daily_rows = query("""
         SELECT 
             metric_date,
@@ -179,12 +190,10 @@ def get_overview_kpis():
     avg_sec = int(kpi_row["avg_duration_sec"] or 0)
     active_incidents = int(kpi_row["active_incidents"] or 0)
 
-    # Dynamic sparklines derived directly from DB history
     run_sparkline = [int(r["total_runs"]) for r in daily_rows] or [total_pipes]
     success_sparkline = [float(r["success_rate"]) for r in daily_rows] or [success_rate]
     failed_sparkline = [int(r["failed_runs"]) for r in daily_rows] or [failed_runs]
 
-    # Calculate period-over-period delta from last two daily records
     rate_delta = 0.0
     if len(daily_rows) >= 2:
         last_rate = float(daily_rows[-1]["success_rate"] or 0)
@@ -203,7 +212,7 @@ def get_overview_kpis():
             "value": f"{success_rate}%",
             "delta": rate_delta,
             "isPositive": rate_delta >= 0,
-            "deltaLabel": "vs previous day",
+            "deltaLabel": "vs previous period",
             "sparkline": success_sparkline
         },
         "failedRuns": {
@@ -211,7 +220,7 @@ def get_overview_kpis():
             "delta": failed_runs,
             "isPositive": failed_runs == 0,
             "isGoodDown": True,
-            "deltaLabel": "total failure events",
+            "deltaLabel": "failed pipeline runs",
             "sparkline": failed_sparkline
         },
         "avgDuration": {
@@ -228,20 +237,15 @@ def get_overview_kpis():
             "delta": active_incidents,
             "isPositive": active_incidents == 0,
             "isGoodDown": True,
-            "deltaLabel": "unresolved failures",
+            "deltaLabel": "open failure incidents",
             "sparkline": failed_sparkline
         }
     })
 
-# ---------------------------------------------------------------------------
-# 2. OVERVIEW CHARTS (Dynamic timeseries from DB)
-# ---------------------------------------------------------------------------
-@app.get("/api/v1/overview/charts")
-@app.get("/v1/overview/charts")
-@app.get("/api/overview/charts")
-@app.get("/overview/charts")
-@app.get("/api/overview/charts")
-def get_overview_charts():
+@overview_router.get("/charts", summary="Overview Execution & Incident Charts")
+def get_overview_charts(
+    time_range: str = Query("24h", description="Time window filter: 24h, 7d, 30d")
+):
     daily_rows = query("""
         SELECT 
             DATE_FORMAT(metric_date, '%%b %%d') as time_label,
@@ -253,7 +257,6 @@ def get_overview_charts():
         ORDER BY metric_date
     """)
 
-    # Incident counts by error class from DB
     incident_rows = query("""
         SELECT 
             DATE_FORMAT(start_time, '%%b %%d') as time_label,
@@ -266,8 +269,6 @@ def get_overview_charts():
 
     runs_over_time = []
     success_rate_trend = []
-    incidents_over_time = []
-
     for r in daily_rows:
         label = str(r["time_label"])
         s_cnt = int(r["success_runs"] or 0)
@@ -283,12 +284,8 @@ def get_overview_charts():
             "cancelled": 0,
             "total": t_cnt
         })
-        success_rate_trend.append({
-            "time": label,
-            "rate": rate
-        })
+        success_rate_trend.append({"time": label, "rate": rate})
 
-    # Group incidents by date
     inc_by_date = {}
     for ir in incident_rows:
         dt = str(ir["time_label"])
@@ -304,13 +301,10 @@ def get_overview_charts():
         else:
             inc_by_date[dt]["low"] += cnt
 
-    for dt, counts in inc_by_date.items():
-        incidents_over_time.append({
-            "time": dt,
-            "high": counts["high"],
-            "medium": counts["medium"],
-            "low": counts["low"]
-        })
+    incidents_over_time = [
+        {"time": dt, "high": counts["high"], "medium": counts["medium"], "low": counts["low"]}
+        for dt, counts in inc_by_date.items()
+    ]
 
     return jsonify({
         "pipelineRunsOverTime": runs_over_time,
@@ -318,20 +312,11 @@ def get_overview_charts():
         "incidentsOverTime": incidents_over_time
     })
 
-# ---------------------------------------------------------------------------
-# 3. OVERVIEW HEALTH (Dynamic 5-Pillars from DB Metrics)
-# ---------------------------------------------------------------------------
-@app.get("/api/v1/overview/health")
-@app.get("/v1/overview/health")
-@app.get("/api/overview/health")
-@app.get("/overview/health")
-@app.get("/api/overview/health")
+@overview_router.get("/health", summary="5-Pillar Observability Dimensions")
 def get_overview_health():
-    # 1. Quality score from success rate
     kpis = query("SELECT success_rate_pct FROM vw_kpi_totals LIMIT 1")[0]
     quality_score = float(kpis["success_rate_pct"] or 80.0)
 
-    # 2. Schema compatibility score
     schema_stats = query("""
         SELECT 
             COUNT(DISTINCT schema_name) as total_schemas,
@@ -341,11 +326,9 @@ def get_overview_health():
     """)[0]
     schema_score = min(100.0, round(90.0 + (int(schema_stats['total_schemas'] or 1) * 2.5), 1))
 
-    # 3. Volume health from total rows recorded
     volume_stats = query("SELECT COUNT(*) as asset_count, SUM(row_count) as total_rows FROM obs_run_assets")[0]
     volume_score = 95.0 if (volume_stats["total_rows"] or 0) > 0 else 80.0
 
-    # 4. Freshness health from asset update timestamps
     freshness_stats = query("""
         SELECT 
             COUNT(*) as total,
@@ -368,16 +351,18 @@ def get_overview_health():
         ]
     })
 
-# ---------------------------------------------------------------------------
-# 4. RECENT INCIDENTS (Dynamic query from vw_failed_runs)
-# ---------------------------------------------------------------------------
-@app.get("/api/v1/overview/recent-incidents")
-@app.get("/v1/overview/recent-incidents")
-@app.get("/api/overview/recent-incidents")
-@app.get("/overview/recent-incidents")
-@app.get("/api/overview/recent-incidents")
-def get_recent_incidents():
-    rows = query("""
+@overview_router.get("/recent-incidents", summary="Recent Pipeline Incidents")
+def get_recent_incidents(
+    severity: Optional[str] = Query("ALL", description="Filter by severity: ALL, Critical, High, Medium, Low"),
+    limit: int = Query(5, ge=1, le=50, description="Max incidents to return")
+):
+    where_sql = ""
+    params = []
+    if severity and severity.upper() != "ALL":
+        where_sql = "WHERE error_class LIKE %s"
+        params.append(f"%{severity}%")
+
+    rows = query(f"""
         SELECT 
             run_id,
             pipeline_name,
@@ -388,14 +373,15 @@ def get_recent_incidents():
             start_time,
             duration
         FROM vw_failed_runs
+        {where_sql}
         ORDER BY start_time DESC
-        LIMIT 10
-    """)
+        LIMIT %s
+    """, tuple(params + [limit]))
     
     incidents = []
     for r in rows:
         err_cls = (r["error_class"] or "etl").lower()
-        severity = "High" if "compilation" in err_cls else ("Medium" if "snowflake" in err_cls else "Low")
+        sev = "Critical" if "compilation" in err_cls else ("High" if "snowflake" in err_cls else "Medium")
         
         incidents.append({
             "id": r["run_id"],
@@ -404,43 +390,49 @@ def get_recent_incidents():
             "targetEntity": r["pipeline_name"],
             "failedNode": r["failed_node"],
             "failureStage": r["failure_stage"],
-            "severity": severity,
+            "severity": sev,
             "time": r["start_time"].isoformat() if r["start_time"] else None,
             "relativeTime": r["start_time"].strftime("%b %d, %Y %I:%M %p") if r["start_time"] else "Recently"
         })
 
     return jsonify({"items": incidents, "total": len(incidents)})
 
+@overview_router.get("/pipeline-monitoring", summary="Overview Pipeline Monitoring Table")
+def get_overview_monitoring():
+    return get_pipelines(page=1, page_size=5)
+
 # ---------------------------------------------------------------------------
-# 5. PIPELINES DIRECTORY & MONITORING (Dynamic query on vw_pipeline_health)
+# 2. PIPELINES MODULE (Comprehensive Filtering & Search)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/pipelines")
-@app.get("/v1/pipelines")
-@app.get("/api/pipelines")
-@app.get("/pipelines")
-@app.get("/api/pipelines")
-@app.get("/api/v1/overview/pipeline-monitoring")
-@app.get("/v1/overview/pipeline-monitoring")
-@app.get("/api/overview/pipeline-monitoring")
-@app.get("/overview/pipeline-monitoring")
-@app.get("/api/overview/pipeline-monitoring")
+@pipelines_router.get("", summary="List Pipelines with Advanced Filters")
 def get_pipelines(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
-    status: Optional[str] = None,
-    search: Optional[str] = None
+    search: Optional[str] = Query(None, description="Search by pipeline name"),
+    status: Optional[str] = Query("ALL", description="Filter by status: ALL, Success, Warning, Failed, Stale, Unhealthy"),
+    source: Optional[str] = Query("ALL", description="Filter by source tool: ALL, MySQL, Snowflake, PostgreSQL, Oracle"),
+    destination: Optional[str] = Query("ALL", description="Filter by destination tool: ALL, Snowflake, BigQuery, Synapse"),
+    owner: Optional[str] = Query("ALL", description="Filter by owner"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page")
 ):
     offset = (page - 1) * page_size
     where_parts = []
     params = []
 
-    if status and status.upper() != "ALL":
-        where_parts.append("h.health_status = %s")
-        params.append(status.lower())
-
     if search:
         where_parts.append("p.pipeline_name LIKE %s")
         params.append(f"%{search}%")
+
+    if status and status.upper() != "ALL":
+        where_parts.append("(h.health_status = %s OR h.latest_status = %s)")
+        params.extend([status.lower(), status.lower()])
+
+    if source and source.upper() != "ALL":
+        where_parts.append("p.source_tool = %s")
+        params.append(source.lower())
+
+    if destination and destination.upper() != "ALL":
+        where_parts.append("p.target_tool = %s")
+        params.append(destination.lower())
 
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
@@ -491,10 +483,10 @@ def get_pipelines(
             "id": r["pipeline_id"],
             "pipeline": r["pipeline_name"],
             "pipeline_name": r["pipeline_name"],
-            "source": r["source_tool"] or "MySQL",
+            "source": (r["source_tool"] or "MySQL").title(),
             "source_schema": r["source_schema"],
-            "etl_tool": r["etl_tool"] or "dbt",
-            "target": r["target_tool"] or "Snowflake",
+            "etl_tool": (r["etl_tool"] or "dbt").title(),
+            "target": (r["target_tool"] or "Snowflake").title(),
             "target_schema": r["target_schema"],
             "status": status_val,
             "health_status": r["health_status"],
@@ -519,57 +511,30 @@ def get_pipelines(
     })
 
 # ---------------------------------------------------------------------------
-# 6. CONSOLIDATED OVERVIEW
+# 3. DATA QUALITY MODULE (Filters by pipeline, domain, status)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/overview")
-@app.get("/v1/overview")
-@app.get("/api/overview")
-@app.get("/overview")
-@app.get("/api/overview")
-def get_full_overview():
-    return jsonify({
-        "status": "success",
-        "code": 200,
-        "meta": {
-            "environment": "production",
-            "database": DB_NAME,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "version": "2.1.0"
-        },
-        "data": {
-            "kpis": get_overview_kpis(),
-            "charts": get_overview_charts(),
-            "observabilityHealth": get_overview_health(),
-            "recentIncidents": get_recent_incidents().get("items", []),
-            "pipelineMonitoring": get_pipelines(page=1, page_size=10).get("items", [])
-        }
-    })
-
-# ---------------------------------------------------------------------------
-# 7. DATA QUALITY OBSERVABILITY (Dynamic from actual DB pipeline runs)
-# ---------------------------------------------------------------------------
-@app.get("/api/v1/observability/quality")
-@app.get("/v1/observability/quality")
-@app.get("/api/observability/data-quality")
-@app.get("/observability/data-quality")
-@app.get("/api/observability/data-quality")
-def get_data_quality():
-    totals = query("""
-        SELECT 
-            total_runs,
-            success_runs,
-            failed_runs,
-            success_rate_pct
-        FROM vw_kpi_totals LIMIT 1
-    """)[0]
-
+@quality_router.get("", summary="Data Quality Health & Pipeline Checks")
+def get_data_quality(
+    pipeline: Optional[str] = Query("ALL", description="Filter by pipeline name"),
+    domain: Optional[str] = Query("ALL", description="Filter by domain/schema name"),
+    owner: Optional[str] = Query("ALL", description="Filter by owner"),
+    status: Optional[str] = Query("ALL", description="Filter by quality status: ALL, Good, Warning, Poor")
+):
+    totals = query("SELECT total_runs, success_runs, failed_runs, success_rate_pct FROM vw_kpi_totals LIMIT 1")[0]
     tot = int(totals["total_runs"] or 0)
     suc = int(totals["success_runs"] or 0)
     fld = int(totals["failed_runs"] or 0)
     rate = float(totals["success_rate_pct"] or 0.0)
 
-    # Per pipeline quality metrics
-    pipe_quality = query("""
+    where_parts = []
+    params = []
+    if pipeline and pipeline.upper() != "ALL":
+        where_parts.append("p.pipeline_name = %s")
+        params.append(pipeline)
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    pipe_quality = query(f"""
         SELECT 
             p.pipeline_id,
             p.pipeline_name,
@@ -580,13 +545,17 @@ def get_data_quality():
             h.last_end_time
         FROM obs_pipelines p
         JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id
+        {where_sql}
         ORDER BY h.success_rate_pct DESC
-    """)
+    """, tuple(params))
 
     top_pipes = []
     for pq in pipe_quality:
         score = float(pq["success_rate_pct"] or 0)
         status_label = "Good" if score >= 85 else ("Warning" if score >= 50 else "Poor")
+        if status and status.upper() != "ALL" and status_label.lower() != status.lower():
+            continue
+
         top_pipes.append({
             "pipeline": pq["pipeline_name"],
             "qualityScore": score,
@@ -598,7 +567,6 @@ def get_data_quality():
             "ownerCode": "DE"
         })
 
-    # Timeline from daily metrics
     daily_timeline = query("SELECT DATE_FORMAT(metric_date, '%%b %%d') as time, ROUND(success_runs * 100.0 / total_runs, 1) as score FROM vw_daily_metrics ORDER BY metric_date")
 
     return jsonify({
@@ -613,15 +581,24 @@ def get_data_quality():
     })
 
 # ---------------------------------------------------------------------------
-# 8. DATA FRESHNESS OBSERVABILITY (Dynamic from obs_run_assets)
+# 4. DATA FRESHNESS MODULE (Filters by search, status, owner)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/observability/freshness")
-@app.get("/v1/observability/freshness")
-@app.get("/api/observability/freshness")
-@app.get("/observability/freshness")
-@app.get("/api/observability/freshness")
-def get_data_freshness():
-    assets = query("""
+@freshness_router.get("", summary="Data Freshness SLAs & Asset Lag")
+def get_data_freshness(
+    search: Optional[str] = Query(None, description="Search by table or schema name"),
+    status: Optional[str] = Query("ALL", description="Filter status: ALL, Fresh, Delayed, Stale"),
+    owner: Optional[str] = Query("ALL", description="Filter by owner"),
+    limit: int = Query(20, ge=1, le=100, description="Items limit")
+):
+    where_parts = []
+    params = []
+    if search:
+        where_parts.append("(a.object_name LIKE %s OR a.schema_name LIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    assets = query(f"""
         SELECT 
             a.id,
             a.object_name,
@@ -632,9 +609,10 @@ def get_data_freshness():
             a.observed_at,
             COALESCE(TIMESTAMPDIFF(MINUTE, a.last_updated_at, a.observed_at), 10) as lag_minutes
         FROM obs_run_assets a
+        {where_sql}
         ORDER BY a.observed_at DESC
-        LIMIT 20
-    """)
+        LIMIT %s
+    """, tuple(params + [limit]))
 
     fresh_cnt = 0
     delayed_cnt = 0
@@ -644,14 +622,17 @@ def get_data_freshness():
     for a in assets:
         lag = int(a["lag_minutes"] or 0)
         if lag <= 60:
-            status = "Fresh"
+            st = "Fresh"
             fresh_cnt += 1
         elif lag <= 180:
-            status = "Delayed"
+            st = "Delayed"
             delayed_cnt += 1
         else:
-            status = "Stale"
+            st = "Stale"
             stale_cnt += 1
+
+        if status and status.upper() != "ALL" and st.lower() != status.lower():
+            continue
 
         lag_str = f"{lag // 60}h {lag % 60}m" if lag >= 60 else f"{lag} min"
         pipe_items.append({
@@ -662,7 +643,7 @@ def get_data_freshness():
             "lastUpdated": a["last_updated_at"].strftime("%b %d, %Y %I:%M %p") if a["last_updated_at"] else "N/A",
             "sla": "1 hr",
             "currentLag": lag_str,
-            "status": status,
+            "status": st,
             "owner": "Data Engineering",
             "ownerCode": "DE"
         })
@@ -677,15 +658,29 @@ def get_data_freshness():
     })
 
 # ---------------------------------------------------------------------------
-# 9. SCHEMA OBSERVABILITY (Dynamic from obs_run_columns)
+# 5. SCHEMA OBSERVABILITY MODULE (Filters by domain, schema_type, change_type)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/observability/schema")
-@app.get("/v1/observability/schema")
-@app.get("/api/observability/schema")
-@app.get("/observability/schema")
-@app.get("/api/observability/schema")
-def get_schema_observability():
-    # Type breakdown
+@schema_router.get("", summary="Schema Evolution, Drift & Column Auditing")
+def get_schema_observability(
+    domain: Optional[str] = Query("ALL", description="Filter by domain/schema name"),
+    schema_type: Optional[str] = Query("ALL", description="Filter by schema type: ALL, TABLE, VIEW, STREAM"),
+    data_type: Optional[str] = Query("ALL", description="Filter by column data type: ALL, TEXT, NUMBER, DATE, BOOLEAN"),
+    search: Optional[str] = Query(None, description="Search column or table name")
+):
+    where_parts = []
+    params = []
+    if domain and domain.upper() != "ALL":
+        where_parts.append("schema_name = %s")
+        params.append(domain)
+    if data_type and data_type.upper() != "ALL":
+        where_parts.append("data_type = %s")
+        params.append(data_type)
+    if search:
+        where_parts.append("(column_name LIKE %s OR object_name LIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
     types_breakdown = query("""
         SELECT 
             data_type,
@@ -696,7 +691,6 @@ def get_schema_observability():
         ORDER BY count DESC
     """)
 
-    # Monitored stats
     stats = query("""
         SELECT 
             COUNT(DISTINCT database_name) as db_count,
@@ -706,8 +700,7 @@ def get_schema_observability():
         FROM obs_run_columns
     """)[0]
 
-    # Recent column schema records
-    recent_cols = query("""
+    recent_cols = query(f"""
         SELECT 
             id,
             database_name,
@@ -717,9 +710,10 @@ def get_schema_observability():
             data_type,
             created_at
         FROM obs_run_columns
+        {where_sql}
         ORDER BY created_at DESC
-        LIMIT 10
-    """)
+        LIMIT 15
+    """, tuple(params))
 
     changes = []
     for c in recent_cols:
@@ -746,13 +740,9 @@ def get_schema_observability():
     })
 
 # ---------------------------------------------------------------------------
-# 10. VOLUME OBSERVABILITY (Dynamic from obs_run_assets)
+# 6. VOLUME OBSERVABILITY MODULE
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/observability/volume")
-@app.get("/v1/observability/volume")
-@app.get("/api/observability/volume")
-@app.get("/observability/volume")
-@app.get("/api/observability/volume")
+@volume_router.get("", summary="Table Row Counts & Volume Trends")
 def get_volume_observability():
     vol_stats = query("SELECT COUNT(*) as asset_count, SUM(row_count) as total_rows FROM obs_run_assets")[0]
     timeline = query("""
@@ -774,15 +764,15 @@ def get_volume_observability():
     })
 
 # ---------------------------------------------------------------------------
-# 11. METRICS EXPLORER (Dynamic from actual run metrics)
+# 7. METRICS EXPLORER MODULE (Filters by category, pipeline, group_by)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/metrics")
-@app.get("/v1/metrics")
-@app.get("/api/observability/metrics")
-@app.get("/observability/metrics")
-@app.get("/metrics")
-@app.get("/api/observability/metrics")
-def get_metrics_explorer():
+@metrics_router.get("", summary="Live Execution Metrics & Telemetry")
+def get_metrics_explorer(
+    metric_category: str = Query("ALL", description="Filter category: ALL, Duration, Freshness, Volume"),
+    metric: Optional[str] = Query("pipeline_run_duration", description="Metric type: pipeline_run_duration, success_rate, run_frequency"),
+    group_by: Optional[str] = Query("pipeline", description="Group by: pipeline, tool, domain"),
+    pipeline: str = Query("ALL", description="Filter by pipeline name")
+):
     kpis = query("""
         SELECT 
             total_runs,
@@ -793,8 +783,13 @@ def get_metrics_explorer():
         FROM vw_kpi_totals LIMIT 1
     """)[0]
 
-    # Live pipelines performance
-    pipes = query("""
+    where_sql = ""
+    params = []
+    if pipeline and pipeline.upper() != "ALL":
+        where_sql = "WHERE p.pipeline_name = %s"
+        params.append(pipeline)
+
+    pipes = query(f"""
         SELECT 
             p.pipeline_name,
             p.etl_tool,
@@ -805,7 +800,8 @@ def get_metrics_explorer():
             (SELECT ROUND(AVG(r.duration), 0) FROM obs_pipeline_runs r WHERE r.pipeline_id = p.pipeline_id) as avg_duration
         FROM obs_pipelines p
         JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id
-    """)
+        {where_sql}
+    """, tuple(params))
 
     live_items = []
     for p in pipes:
@@ -837,18 +833,40 @@ def get_metrics_explorer():
     })
 
 # ---------------------------------------------------------------------------
-# 12. LOGS STREAM (Dynamic from obs_pipeline_runs)
+# 8. LOGS MODULE (Filters by level, pipeline, tool, search, limit)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/logs")
-@app.get("/v1/logs")
-@app.get("/api/logs")
-@app.get("/logs")
-@app.get("/api/logs")
+@logs_router.get("", summary="Real-time Execution Logs Stream")
 def get_logs(
-    limit: int = Query(20, le=100),
-    level: Optional[str] = None
+    pipeline: Optional[str] = Query("ALL", description="Filter by pipeline name"),
+    tool: Optional[str] = Query("ALL", description="Filter by tool: ALL, dbt, Fivetran, Airbyte, Snowflake, Informatica"),
+    level: Optional[str] = Query("ALL", description="Filter log level: ALL, ERROR, WARN, INFO, DEBUG"),
+    search: Optional[str] = Query(None, description="Search by message, error, or pipeline name"),
+    limit: int = Query(20, ge=1, le=100, description="Items limit")
 ):
-    rows = query("""
+    where_parts = []
+    params = []
+
+    if level and level.upper() != "ALL":
+        if level.upper() == "ERROR":
+            where_parts.append("r.status = 'failed'")
+        else:
+            where_parts.append("r.status != 'failed'")
+
+    if pipeline and pipeline.upper() != "ALL":
+        where_parts.append("r.pipeline_name = %s")
+        params.append(pipeline)
+
+    if tool and tool.upper() != "ALL":
+        where_parts.append("r.tool_name = %s")
+        params.append(tool.lower())
+
+    if search:
+        where_parts.append("(r.error_message LIKE %s OR r.pipeline_name LIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    rows = query(f"""
         SELECT 
             r.id as run_id,
             r.pipeline_name,
@@ -862,9 +880,10 @@ def get_logs(
             r.tool_name,
             r.rows_added
         FROM obs_pipeline_runs r
+        {where_sql}
         ORDER BY r.start_time DESC
         LIMIT %s
-    """, (limit,))
+    """, tuple(params + [limit]))
 
     items = []
     for r in rows:
@@ -896,15 +915,24 @@ def get_logs(
     })
 
 # ---------------------------------------------------------------------------
-# 13. INCIDENTS (Dynamic from vw_failed_runs)
+# 9. INCIDENTS MODULE (Filters by severity, status, search)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/incidents")
-@app.get("/v1/incidents")
-@app.get("/api/incidents")
-@app.get("/incidents")
-@app.get("/api/incidents")
-def get_incidents():
-    failed_rows = query("""
+@incidents_router.get("", summary="Incident Management & Triage")
+def get_incidents(
+    severity: Optional[str] = Query("ALL", description="Filter severity: ALL, Critical, High, Medium, Low"),
+    status: Optional[str] = Query("ALL", description="Filter incident status: ALL, Open, Triage, Resolved"),
+    search: Optional[str] = Query(None, description="Search by pipeline or error text")
+):
+    where_parts = []
+    params = []
+
+    if search:
+        where_parts.append("(pipeline_name LIKE %s OR error_message LIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    failed_rows = query(f"""
         SELECT 
             run_id,
             pipeline_name,
@@ -915,13 +943,17 @@ def get_incidents():
             start_time,
             duration
         FROM vw_failed_runs
+        {where_sql}
         ORDER BY start_time DESC
-    """)
+    """, tuple(params))
 
     items = []
     for r in failed_rows:
         err_cls = (r["error_class"] or "etl").lower()
         sev = "Critical" if "compilation" in err_cls else ("High" if "snowflake" in err_cls else "Medium")
+        if severity and severity.upper() != "ALL" and sev.lower() != severity.lower():
+            continue
+
         items.append({
             "id": f"INC-{r['run_id'][:8]}",
             "incident": f"{r['pipeline_name']} failure: {r['error_class'] or 'runtime'}",
@@ -947,15 +979,31 @@ def get_incidents():
     })
 
 # ---------------------------------------------------------------------------
-# 14. LINEAGE (Dynamic from obs_pipelines and obs_run_assets)
+# 10. LINEAGE MODULE (Filters by source, target, status, search)
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/lineage")
-@app.get("/v1/lineage")
-@app.get("/api/lineage")
-@app.get("/lineage")
-@app.get("/api/lineage")
-def get_lineage():
-    pipes = query("""
+@lineage_router.get("", summary="End-to-End Data Lineage & Topology")
+def get_lineage(
+    source_type: Optional[str] = Query("ALL", description="Filter source: ALL, MySQL, PostgreSQL, Oracle, Snowflake"),
+    target_type: Optional[str] = Query("ALL", description="Filter target: ALL, Snowflake, BigQuery, Synapse"),
+    status: Optional[str] = Query("ALL", description="Filter status: ALL, Healthy, Degraded, Failed"),
+    search: Optional[str] = Query(None, description="Search pipeline name")
+):
+    where_parts = []
+    params = []
+
+    if search:
+        where_parts.append("p.pipeline_name LIKE %s")
+        params.append(f"%{search}%")
+    if source_type and source_type.upper() != "ALL":
+        where_parts.append("p.source_tool = %s")
+        params.append(source_type.lower())
+    if target_type and target_type.upper() != "ALL":
+        where_parts.append("p.target_tool = %s")
+        params.append(target_type.lower())
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    pipes = query(f"""
         SELECT 
             p.pipeline_id,
             p.pipeline_name,
@@ -972,11 +1020,16 @@ def get_lineage():
         LEFT JOIN vw_pipeline_health h ON p.pipeline_id = h.pipeline_id
         LEFT JOIN obs_pipeline_runs r ON p.pipeline_id = r.pipeline_id
         LEFT JOIN obs_run_assets a ON r.id = a.run_id
+        {where_sql}
         GROUP BY p.pipeline_id, p.pipeline_name, p.source_tool, p.source_schema, p.etl_tool, p.target_tool, p.target_schema, p.is_active, h.health_status, h.last_end_time
-    """)
+    """, tuple(params))
 
     flows = []
     for p in pipes:
+        st = "Healthy" if p["health_status"] == "healthy" else ("Degraded" if p["health_status"] == "stale" else "Failed")
+        if status and status.upper() != "ALL" and st.lower() != status.lower():
+            continue
+
         rec_cnt = int(p["total_rows"] or 0)
         flows.append({
             "id": p["pipeline_id"],
@@ -984,7 +1037,7 @@ def get_lineage():
             "source": {"type": (p["source_tool"] or "MySQL").title(), "instance": p["source_schema"] or "source_db"},
             "tool": {"type": (p["etl_tool"] or "dbt").title(), "action": "Transformation"},
             "target": {"type": (p["target_tool"] or "Snowflake").title(), "instance": p["target_schema"] or "analytics_dw"},
-            "status": "Healthy" if p["health_status"] == "healthy" else ("Degraded" if p["health_status"] == "stale" else "Failed"),
+            "status": st,
             "lastRun": p["last_end_time"].strftime("%b %d, %Y %I:%M %p") if p["last_end_time"] else "N/A",
             "volume24h": f"{rec_cnt} records"
         })
@@ -1001,13 +1054,9 @@ def get_lineage():
     })
 
 # ---------------------------------------------------------------------------
-# 15. ALERTS (Dynamic from recent failures)
+# 11. ALERTS MODULE
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/alerts")
-@app.get("/v1/alerts")
-@app.get("/api/alerts")
-@app.get("/alerts")
-@app.get("/api/alerts")
+@alerts_router.get("", summary="Active Alert Notifications")
 def get_alerts():
     failed = query("SELECT run_id, pipeline_name, error_class, error_message, start_time FROM vw_failed_runs ORDER BY start_time DESC LIMIT 5")
     items = []
@@ -1024,6 +1073,21 @@ def get_alerts():
         "unreadCount": len(items),
         "items": items
     })
+
+# ---------------------------------------------------------------------------
+# INCLUDE CLEAN APIRouters (Exact canonical endpoints)
+# ---------------------------------------------------------------------------
+app.include_router(overview_router)
+app.include_router(pipelines_router)
+app.include_router(quality_router)
+app.include_router(freshness_router)
+app.include_router(schema_router)
+app.include_router(volume_router)
+app.include_router(metrics_router)
+app.include_router(logs_router)
+app.include_router(incidents_router)
+app.include_router(lineage_router)
+app.include_router(alerts_router)
 
 if __name__ == "__main__":
     import uvicorn
