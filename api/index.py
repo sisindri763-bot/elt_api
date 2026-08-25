@@ -1,4 +1,6 @@
-from main import app
+import sys
+import os
 
-# Vercel ASGI Handler entry point
-handler = app
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from main import app
