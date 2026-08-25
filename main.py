@@ -56,6 +56,18 @@ class TimeRangeEnum(str, Enum):
     R_7D = "7d"
     R_30D = "30d"
 
+class QualityStatusEnum(str, Enum):
+    ALL = "ALL"
+    GOOD = "Good"
+    WARNING = "Warning"
+    POOR = "Poor"
+
+class FreshnessStatusEnum(str, Enum):
+    ALL = "ALL"
+    FRESH = "Fresh"
+    DELAYED = "Delayed"
+    STALE = "Stale"
+
 class StatusFilterEnum(str, Enum):
     ALL = "ALL"
     SUCCESS = "Success"
@@ -850,7 +862,7 @@ def get_run_details(run_id: str = Path(..., description="Unique Run ID")):
 def get_data_quality(
     pipeline: str = Query("ALL", description="Filter by pipeline name"),
     domain: str = Query("ALL", description="Filter by schema/domain"),
-    status: StatusFilterEnum = Query(StatusFilterEnum.ALL, description="Filter quality score status")
+    status: QualityStatusEnum = Query(QualityStatusEnum.ALL, description="Filter quality score status")
 ):
     t0 = time.time()
     totals = query("SELECT total_runs, success_runs, failed_runs, success_rate_pct FROM vw_kpi_totals LIMIT 1")[0]
@@ -886,7 +898,7 @@ def get_data_quality(
     for pq in pipe_quality:
         score = float(pq["success_rate_pct"] or 0)
         status_label = "Good" if score >= 85 else ("Warning" if score >= 50 else "Poor")
-        if status != StatusFilterEnum.ALL and status_label.lower() != status.value.lower():
+        if status != QualityStatusEnum.ALL and status_label.lower() != status.value.lower():
             continue
 
         top_pipes.append({
@@ -919,7 +931,7 @@ def get_data_quality(
 @freshness_router.get("", summary="Data Freshness SLAs & Table Delay Tracking")
 def get_data_freshness(
     search: Optional[str] = Query(None, description="Search by table or schema"),
-    status: StatusFilterEnum = Query(StatusFilterEnum.ALL, description="Filter status: Fresh, Delayed, Stale"),
+    status: FreshnessStatusEnum = Query(FreshnessStatusEnum.ALL, description="Filter status: Fresh, Delayed, Stale"),
     limit: int = Query(20, ge=1, le=100, description="Items limit")
 ):
     t0 = time.time()
@@ -965,7 +977,7 @@ def get_data_freshness(
             st = "Stale"
             stale_cnt += 1
 
-        if status != StatusFilterEnum.ALL and st.lower() != status.value.lower():
+        if status != FreshnessStatusEnum.ALL and st.lower() != status.value.lower():
             continue
 
         lag_str = f"{lag // 60}h {lag % 60}m" if lag >= 60 else f"{lag} min"
@@ -1368,7 +1380,7 @@ def get_lineage(
     flows = []
     for p in pipes:
         st = "Healthy" if p["health_status"] == "healthy" else ("Degraded" if p["health_status"] == "stale" else "Failed")
-        if status != StatusFilterEnum.ALL and st.lower() != status.value.lower():
+        if status != FreshnessStatusEnum.ALL and st.lower() != status.value.lower():
             continue
 
         rec_cnt = int(p["total_rows"] or 0)
