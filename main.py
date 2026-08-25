@@ -19,11 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # ---------------------------------------------------------------------------
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-HOST     = os.getenv("CENTRAL_DB_HOST") or os.getenv("DB_HOST", "localhost")
-PORT     = int(os.getenv("CENTRAL_DB_PORT") or os.getenv("DB_PORT", "3306"))
-USER     = os.getenv("CENTRAL_DB_USER") or os.getenv("DB_USER", "root")
-PASSWORD = os.getenv("CENTRAL_DB_PASSWORD") or os.getenv("DB_PASSWORD", "")
-DB_NAME  = os.getenv("CENTRAL_DB_NAME") or os.getenv("DB_NAME", "metadata")
+HOST     = os.getenv("DB_HOST", "localhost")
+PORT     = int(os.getenv("DB_PORT", "3306"))
+USER     = os.getenv("DB_USER", "root")
+PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME  = os.getenv("DB_NAME", "metadata")
 
 app = FastAPI(
     title="VITHI Data Observability Engine",
