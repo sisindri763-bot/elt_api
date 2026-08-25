@@ -19,11 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # ---------------------------------------------------------------------------
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-HOST     = os.getenv("DB_HOST", "localhost")
-PORT     = int(os.getenv("DB_PORT", "3306"))
-USER     = os.getenv("DB_USER", "root")
-PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME  = os.getenv("DB_NAME", "metadata")
+HOST     = os.getenv("CENTRAL_DB_HOST") or os.getenv("DB_HOST", "localhost")
+PORT     = int(os.getenv("CENTRAL_DB_PORT") or os.getenv("DB_PORT", "3306"))
+USER     = os.getenv("CENTRAL_DB_USER") or os.getenv("DB_USER", "root")
+PASSWORD = os.getenv("CENTRAL_DB_PASSWORD") or os.getenv("DB_PASSWORD", "")
+DB_NAME  = os.getenv("CENTRAL_DB_NAME") or os.getenv("DB_NAME", "metadata")
 
 app = FastAPI(
     title="VITHI Data Observability Engine",
@@ -31,12 +31,16 @@ app = FastAPI(
     version="2.1.0",
 )
 
+cors_origins_env = os.getenv("CORS_ORIGINS", "*")
+origins = [orig.strip() for orig in cors_origins_env.split(",")] if cors_origins_env != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ---------------------------------------------------------------------------
