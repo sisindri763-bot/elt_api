@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import query
 from app.routers.dashboard_v1 import router as dashboard_v1_router
+from app.routers.v1_management import router as v1_management_router
 
 app = FastAPI(
     title="ETL Observability App API",
@@ -43,8 +44,9 @@ def health():
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
-# Mount /api/v1 router
+# Mount /api/v1 dashboard router & v1 management router
 app.include_router(dashboard_v1_router)
+app.include_router(v1_management_router)
 
 if __name__ == "__main__":
     import uvicorn
