@@ -594,7 +594,7 @@ def list_pipelines(
 # ---------------------------------------------------------------------------
 @router.get("/pipelines/{pipeline_id}", summary="Full pipeline details by id")
 def get_pipeline_by_id(pipeline_id: str = Path(...)):
-    rows = query("SELECT * FROM obs_pipelines WHERE pipeline_id = %s", (pipeline_id,))
+    rows = query("SELECT * FROM obs_pipelines WHERE pipeline_id = %s OR pipeline_name = %s", (pipeline_id, pipeline_id))
     if not rows:
         raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
     runs = query("SELECT * FROM obs_pipeline_runs WHERE pipeline_id = %s ORDER BY start_time DESC LIMIT 10", (pipeline_id,))
@@ -937,7 +937,7 @@ def get_lineage(
 # ---------------------------------------------------------------------------
 @router.get("/lineage/{pipeline_id}", summary="Lineage detail for one pipeline")
 def get_lineage_by_id(pipeline_id: str = Path(...)):
-    rows = query("SELECT * FROM obs_pipelines WHERE pipeline_id = %s", (pipeline_id,))
+    rows = query("SELECT * FROM obs_pipelines WHERE pipeline_id = %s OR pipeline_name = %s", (pipeline_id, pipeline_id))
     if not rows:
         raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
     return build_envelope(extra_fields={"pipeline": rows[0]})
